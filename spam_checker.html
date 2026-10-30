@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>문자 스팸 판별기</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #ffffff; --text: #1d1f23; --muted: #6b7078; --line: #dde0e5;
+    --accent: #2f6fde; --spam: #d93025; --spam-bg: #fdecea; --ok: #1e8e3e; --ok-bg: #e6f4ea;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #15171a; --card: #1f2226; --text: #e8eaed; --muted: #9aa0a6; --line: #34383d;
+      --accent: #6ea0ff; --spam: #f28b82; --spam-bg: #3a1f1d; --ok: #81c995; --ok-bg: #1c3324;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font-family: "Pretendard", "Malgun Gothic", system-ui, sans-serif; line-height: 1.5; }
+  main { max-width: 640px; margin: 0 auto; padding: 32px 16px 48px; }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 24px; font-size: .95rem; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 20px; margin-bottom: 16px; }
+  label { font-weight: 600; display: block; margin-bottom: 8px; }
+  textarea { width: 100%; min-height: 160px; resize: vertical; padding: 12px; font: inherit;
+             border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--text); }
+  .drop { margin-top: 12px; border: 2px dashed var(--line); border-radius: 10px; padding: 16px;
+          text-align: center; color: var(--muted); cursor: pointer; font-size: .9rem; }
+  .drop.over { border-color: var(--accent); color: var(--accent); }
+  .drop img { max-width: 100%; max-height: 240px; border-radius: 8px; display: block; margin: 0 auto 8px; }
+  .row { display: flex; gap: 8px; margin-top: 14px; }
+  button { flex: 1; padding: 12px; font: inherit; font-weight: 600; border-radius: 10px; cursor: pointer;
+           border: 1px solid var(--line); background: var(--card); color: var(--text); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  .status { margin-top: 10px; color: var(--muted); font-size: .9rem; min-height: 1.4em; }
+  .result { font-size: 1.6rem; font-weight: 700; text-align: center; padding: 22px; border-radius: 12px; }
+  .result.spam { color: var(--spam); background: var(--spam-bg); }
+  .result.ok { color: var(--ok); background: var(--ok-bg); }
+  details { margin-top: 12px; color: var(--muted); font-size: .9rem; }
+  details ul { margin: 8px 0 0; padding-left: 20px; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>문자 스팸 판별기</h1>
+  <p class="sub">문자 내용을 붙여 넣거나 스크린샷을 올리면 스팸인지 알려 줍니다. 발신자가 불분명하고 사기와 관련된 문자만 스팸으로 봅니다.</p>
+
+  <section class="card">
+    <label for="msg">문자 내용</label>
+    <textarea id="msg" placeholder="여기에 문자 내용을 붙여 넣으세요."></textarea>
+    <div class="drop" id="drop">
+      <img id="preview" class="hidden" alt="올린 스크린샷">
+      <span id="dropText">스크린샷을 끌어다 놓거나, 클릭해서 고르거나, Ctrl+V로 붙여 넣으세요 (글자를 자동으로 읽습니다)</span>
+    </div>
+    <input type="file" id="file" accept="image/*" class="hidden">
+    <div class="row">
+      <button class="primary" id="check">스팸인지 확인</button>
+      <button id="clear">지우기</button>
+    </div>
+    <div class="status" id="status"></div>
+  </section>
+
+  <section class="card hidden" id="resultCard">
+    <div class="result" id="result"></div>
+    <details>
+      <summary>판단 근거 보기</summary>
+      <ul id="reasons"></ul>
+    </details>
+  </section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<script>
+// 단축 URL·메신저 링크: 어디로 가는지 알 수 없어 사기에 자주 쓰임
+const SHORT_DOMAINS = ['ko.gl', 'ko.fm', 'bit.ly', 'han.gl', 'me2.do', 'url.kr', 'vo.la', 'buly.kr',
+  'tinyurl.com', 'is.gd', 'cutt.ly', 'shorturl.at', 'rb.gy', 'goo.gl', 'naver.me', 'c11.kr', 'zrr.kr',
+  'muz.so', 'lrl.kr', 't.me', 'open.kakao.com', 'qr.kakao.com'];
+// 공식 도메인: 링크가 이쪽이면 의심 링크로 보지 않음
+const OFFICIAL_DOMAINS = ['go.kr', 'lguplus.co.kr', 'uplus.co.kr', 'sktelecom.com', 'tworld.co.kr', 'kt.com',
+  'samsungcard.com', 'shinhancard.com', 'kbcard.com', 'hyundaicard.com', 'coupang.com', 'naver.com',
+  'kakaobank.com', 'epost.go.kr', 'cjlogistics.com'];
+// 링크 클릭을 유도하는 핑계
+const PRETEXTS = ['부고', '별세', '장례', '모바일부고', '청첩장', '돌잔치', '택배', '배송', '주소불명', '반송', '운송장',
+  '결제', '승인', '해외결제', '환불', '미납', '과태료', '벌금', '범칙금', '통고처분', '무단투기', '교통위반', '고지서',
+  '계정정지', '정지됩니다', '차단', '본인인증', '개인정보', '건강검진', '정부지원', '지원금', '재난지원', '환급'];
+// 그 자체로 사기·불법인 내용
+const FRAUD = ['리딩방', '고수익', '수익보장', '원금보장', '투자멘토', '종목추천', '급등주', '코인', '선물방',
+  '카지노', '토토', '바카라', '슬롯', '먹튀', '대출', '무직자', '신불자', '당일입금', '저금리대환', '성인방송', '성인용품', '조건만남'];
+// 가족·지인 사칭
+const IMPERSONATE = ['엄마', '아빠', '폰이고장', '액정이깨', '폰고장', '임시폰', '문화상품권', '구글기프트', '앱설치',
+  '원격', '송금', '이체좀', '돈좀'];
+const URGENCY = ['지금바로', '오늘만', '마감임박', '즉시', '24시간내', '선착순'];
+const COMPANIES = ['LGU+', 'LG유플러스', 'SKT', 'SK텔레콤', 'KT', '삼성카드', '신한카드', '국민카드', '현대카드', '쿠팡',
+  '네이버', '카카오', '우체국', 'CJ대한통운', '롯데택배', '한진택배'];
+
+function hits(text, words) { return words.filter(w => text.includes(w.replace(/\s/g, ''))); }
+
+function findUrls(raw) {
+  const re = /(?:https?:\/\/)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/[^\s)]*)?/gi;
+  return (raw.match(re) || []).map(u => u.toLowerCase().replace(/^https?:\/\//, ''));
+}
+
+function classify(raw) {
+  const text = raw.replace(/\s+/g, '');           // 띄어쓰기·OCR 줄바꿈 영향 줄이기
+  const reasons = [];
+  const urls = findUrls(raw);
+  const shortUrls = urls.filter(u => SHORT_DOMAINS.some(d => u.startsWith(d + '/') || u === d || u.includes('.' + d)));
+  const officialUrls = urls.filter(u => OFFICIAL_DOMAINS.some(d => u.split('/')[0].endsWith(d)));
+  const unknownUrls = urls.filter(u => !officialUrls.includes(u));
+  const pretext = hits(text, PRETEXTS), fraud = hits(text, FRAUD), imp = hits(text, IMPERSONATE), urg = hits(text, URGENCY);
+  const company = hits(text.toUpperCase(), COMPANIES.map(c => c.toUpperCase()));
+  const optOut = /수신거부|무료거부/.test(text) && /080\d{7}/.test(text.replace(/-/g, ''));
+  const foreign = text.includes('국외발신') || text.includes('국제발신');
+
+  let spam = false;
+  if (shortUrls.length) { spam = true; reasons.push('어디로 가는지 알 수 없는 단축 URL·메신저 링크: ' + shortUrls.join(', ')); }
+  if (unknownUrls.length && pretext.length) { spam = true; reasons.push('핑계(' + pretext.join(', ') + ')를 대며 링크 클릭 유도'); }
+  if (fraud.length) { spam = true; reasons.push('사기·불법 관련 내용: ' + fraud.join(', ')); }
+  if (imp.length >= 2 || (imp.length && /송금|이체|상품권|앱설치|원격/.test(text))) { spam = true; reasons.push('가족·지인 사칭 의심: ' + imp.join(', ')); }
+  if (foreign && (urls.length || pretext.length)) { spam = true; reasons.push('국외발신 + 링크·핑계 문구'); }
+  if (urg.length && unknownUrls.length) { spam = true; reasons.push('서두르게 만드는 문구(' + urg.join(', ') + ')와 링크'); }
+
+  if (!spam) {
+    if (company.length && optOut) reasons.push('발신 회사(' + company.join(', ') + ')가 명확하고 무료 수신거부 번호가 있는 정식 광고');
+    else if (/\[?web발신\]?|\(광고\)|\[광고\]/i.test(text)) reasons.push('광고 표시는 있지만 사기 관련 신호는 없음');
+    else reasons.push('사기 관련 신호가 없음');
+    if (officialUrls.length) reasons.push('공식 도메인 링크: ' + officialUrls.join(', '));
+  }
+  return { spam, reasons };
+}
+
+const $ = id => document.getElementById(id);
+const msg = $('msg'), drop = $('drop'), fileInput = $('file'), status = $('status');
+
+$('check').onclick = () => {
+  const raw = msg.value.trim();
+  if (!raw) { status.textContent = '문자 내용을 입력하거나 스크린샷을 올려 주세요.'; return; }
+  status.textContent = '';
+  const { spam, reasons } = classify(raw);
+  const r = $('result');
+  r.textContent = spam ? '스팸입니다.' : '스팸이 아닙니다.';
+  r.className = 'result ' + (spam ? 'spam' : 'ok');
+  $('reasons').innerHTML = '';
+  reasons.forEach(t => { const li = document.createElement('li'); li.textContent = t; $('reasons').appendChild(li); });
+  $('resultCard').classList.remove('hidden');
+};
+
+$('clear').onclick = () => {
+  msg.value = ''; status.textContent = ''; fileInput.value = '';
+  $('preview').classList.add('hidden'); $('resultCard').classList.add('hidden');
+};
+
+async function readImage(file) {
+  if (!file || !file.type.startsWith('image/')) return;
+  const img = $('preview');
+  img.src = URL.createObjectURL(file); img.classList.remove('hidden');
+  if (!window.Tesseract) { status.textContent = '글자 인식 라이브러리를 불러오지 못했습니다. 인터넷 연결을 확인하거나 내용을 직접 붙여 넣어 주세요.'; return; }
+  $('check').disabled = true;
+  status.textContent = '스크린샷에서 글자를 읽는 중… (처음엔 한국어 데이터를 받느라 조금 걸립니다)';
+  try {
+    const { data } = await Tesseract.recognize(file, 'kor+eng', {
+      logger: m => { if (m.status === 'recognizing text') status.textContent = '글자 읽는 중… ' + Math.round(m.progress * 100) + '%'; }
+    });
+    msg.value = data.text.trim();
+    status.textContent = '글자를 읽었습니다. 틀린 부분이 있으면 고친 뒤 확인을 누르세요.';
+    $('check').click();
+  } catch (e) {
+    status.textContent = '글자 인식에 실패했습니다. 내용을 직접 붙여 넣어 주세요.';
+  } finally { $('check').disabled = false; }
+}
+
+drop.onclick = () => fileInput.click();
+fileInput.onchange = () => readImage(fileInput.files[0]);
+drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
+drop.ondragleave = () => drop.classList.remove('over');
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over'); readImage(e.dataTransfer.files[0]); };
+document.addEventListener('paste', e => {
+  const item = [...(e.clipboardData?.items || [])].find(i => i.type.startsWith('image/'));
+  if (item) { e.preventDefault(); readImage(item.getAsFile()); }
+});
+</script>
+</body>
+</html>
